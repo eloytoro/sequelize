@@ -511,6 +511,227 @@ User.findAll({
 });
 ```
 
+### Using BelongsToMany with Non Primary Key Relationships
+
+If you want to create a belongs to many relationship that does not use the default primary key some setup work is required.  You must set the `foreignKey`, `tarketKey`, and `sourceKey` appropriately for the two ends of the belongs to many. Further you must also ensure you have appropriate indexes created on your relationships. For example:
+
+```js
+const User = this.sequelize.define('User', {
+  id: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    primaryKey: true,
+    defaultValue: DataTypes.UUIDV4
+  },
+  secondId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    defaultValue: DataTypes.UUIDV4,
+    field: 'second_id'
+  }
+}, {
+  tableName: 'tbl_user',
+  indexes: [
+    {
+      unique: true,
+      fields: ['second_id']
+    }
+  ]
+});
+
+const Group = this.sequelize.define('Group', {
+  id: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    primaryKey: true,
+    defaultValue: DataTypes.UUIDV4,
+    field: 'group_id'
+  }
+}, {
+  tableName: 'tbl_group'
+});
+
+const UserHasGroup = this.sequelize.define('UserHasGroup', {
+  secondId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    field: 'second_id'
+  },
+  groupId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    field: 'group_id'
+  }
+}, {
+  tableName: 'tbl_user_has_group',
+  indexes: [
+    {
+      unique: true,
+      fields: ['group_id', 'second_id']
+    }
+  ]
+});
+
+User.belongsToMany(Group, {
+  through: UserHasGroup,
+  foreignKey: 'secondId',
+  sourceKey: 'secondId'
+});
+
+Group.belongsToMany(User, {
+  through: UserHasGroup,
+  foreignKey: 'groupId',
+  targetKey: 'secondId'
+});
+```
+
+## Scopes
+This section concerns association scopes. For a definition of association scopes vs. scopes on associated models, see [Scopes](/manual/tutorial/scopes.html).
+
+Association scopes allow you to place a scope (a set of default attributes for `get` and `create`) on the association. Scopes can be placed both on the associated model (the target of the association), and on the through table for n:m relations.
+
+#### 1:m
+Assume we have tables Comment, Post, and Image. A comment can be associated to either an image or a post via `commentable_id` and `commentable` - we say that Post and Image are `Commentable`
+
+```js
+const Comment = this.sequelize.define('comment', {
+  title: Sequelize.STRING,
+  commentable: Sequelize.STRING,
+  commentable_id: Sequelize.INTEGER
+});
+
+Comment.prototype.getItem = function(options) {
+  return this['get' + this.get('commentable').substr(0, 1).toUpperCase() + this.get('commentable').substr(1)](options);
+};
+
+Post.hasMany(this.Comment, {
+  foreignKey: 'commentable_id',
+  constraints: false,
+  scope: {
+    commentable: 'post'
+  }
+});
+Comment.belongsTo(this.Post, {
+  foreignKey: 'commentable_id',
+  constraints: false,
+  as: 'post'
+});
+
+Image.hasMany(this.Comment, {
+  foreignKey: 'commentable_id',
+  constraints: false,
+  scope: {
+    commentable: 'image'
+  }
+});
+Comment.belongsTo(this.Image, {
+  foreignKey: 'commentable_id',
+  constraints: false,
+  as: 'image'
+});
+```
+
+`constraints: false,` disables references constraints - since the `commentable_id` column references several tables, we cannot add a `REFERENCES` constraint to it. Note that the Image -> Comment and Post -> Comment relations define a scope, `commentable: 'image'` and `commentable: 'post'` respectively. This scope is automatically applied when using the association functions:
+
+```js
+image.getComments()
+SELECT * FROM comments WHERE commentable_id = 42 AND commentable = 'image';
+
+image.createComment({
+  title: 'Awesome!'
+})
+INSERT INTO comments (title, commentable_id, commentable) VALUES ('Awesome!', 42, 'image');
+
+image.addComment(comment);
+UPDATE comments SET commentable_id = 42, commentable = 'image'
+```
+
+The `getItem` utility function on `Comment` completes the picture - it simply converts the `commentable` string into a call to either `getImage` or `getPost`, providing an abstraction over whether a comment belongs to a post or an image. You can pass a normal options object as a parameter to `getItem(options)` to specify any where conditions or includes.
+
+#### n:m
+Continuing with the idea of a polymorphic model, consider a tag table - an item can have multiple tags, and a tag can be related to several items.
+
+For brevity, the example only shows a Post model, but in reality Tag would be related to several other models.
+
+```js
+const ItemTag = sequelize.define('item_tag', {
+  id : {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true
+  },
+  tag_id: {
+    type: DataTypes.INTEGER,
+    unique: 'item_tag_taggable'
+  },
+  taggable: {
+    type: DataTypes.STRING,
+    unique: 'item_tag_taggable'
+  },
+  taggable_id: {
+    type: DataTypes.INTEGER,
+    unique: 'item_tag_taggable',
+    references: null
+  }
+});
+const Tag = sequelize.define('tag', {
+  name: DataTypes.STRING
+});
+
+Post.belongsToMany(Tag, {
+  through: {
+    model: ItemTag,
+    unique: false,
+    scope: {
+      taggable: 'post'
+    }
+  },
+  foreignKey: 'taggable_id',
+  constraints: false
+});
+Tag.belongsToMany(Post, {
+  through: {
+    model: ItemTag,
+    unique: false
+  },
+  foreignKey: 'tag_id',
+  constraints: false
+});
+```
+
+Notice that the scoped column (`taggable`) is now on the through model (`ItemTag`).
+
+We could also define a more restrictive association, for example, to get all pending tags for a post by applying a scope of both the through model (`ItemTag`) and the target model (`Tag`):
+
+```js
+Post.hasMany(Tag, {
+  through: {
+    model: ItemTag,
+    unique: false,
+    scope: {
+      taggable: 'post'
+    }
+  },
+  scope: {
+    status: 'pending'
+  },
+  as: 'pendingTags',
+  foreignKey: 'taggable_id',
+  constraints: false
+});
+
+Post.getPendingTags();
+```
+```sql
+SELECT `tag`.*  INNER JOIN `item_tags` AS `item_tag`
+ON `tag`.`id` = `item_tag`.`tagId`
+  AND `item_tag`.`taggable_id` = 42
+  AND `item_tag`.`taggable` = 'post'
+WHERE (`tag`.`status` = 'pending');
+```
+
+`constraints: false` disables references constraints on the `taggable_id` column. Because the column is polymorphic, we cannot say that it `REFERENCES` a specific table.
+
 ## Naming strategy
 
 By default sequelize will use the model name (the name passed to `sequelize.define`) to figure out the name of the model when used in associations. For example, a model named `user` will add the functions `get/set/add User` to instances of the associated model, and a property named `.user` in eager loading, while a model named `User` will add the same functions, but a property named `.User` (notice the upper case U) in eager loading.
